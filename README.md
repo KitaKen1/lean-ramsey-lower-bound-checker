@@ -4,8 +4,8 @@ This repository contains Lean code to verify witness graphs for Ramsey lower bou
 
 Current examples:
 
-- `R(3,13) >= 61` (`R(3,13) ≠ 60`) (VReported in [1], witness graph data from [2])
-- `R(4,13) >= 139` (`R(4,13) ≠ 138`) (VReported in [1], witness graph data from [2])
+- `R(3,13) >= 61` (`R(3,13) ≠ 60`) (Reported in [1], witness graph data from [2])
+- `R(4,13) >= 139` (`R(4,13) ≠ 138`) (Reported in [1], witness graph data from [2])
 
 ## Lean File Structure
 
