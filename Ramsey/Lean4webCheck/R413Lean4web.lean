@@ -1,0 +1,388 @@
+import Std
+
+namespace RamseyWeb
+
+/- Source adjacency matrix:
+https://github.com/google-research/google-research/blob/master/ramsey_number_bounds/improved_bounds/R(4,%2013)%20%3E=%20139.txt
+-/
+
+def fullMask (size : Nat) : Nat :=
+  if size == 0 then
+    0
+  else
+    (1 <<< size) - 1
+
+def bitMask (i : Nat) : Nat :=
+  1 <<< i
+
+structure BitSet where
+  size : Nat
+  mask : Nat
+  deriving Repr, Inhabited
+
+def BitSet.empty (size : Nat) : BitSet :=
+  { size := size, mask := 0 }
+
+def BitSet.full (size : Nat) : BitSet :=
+  { size := size, mask := fullMask size }
+
+def BitSet.ofNatMask (size : Nat) (mask : Nat) : BitSet :=
+  { size := size, mask := mask &&& (fullMask size) }
+
+def BitSet.setBit (s : BitSet) (i : Nat) : BitSet :=
+  if i < s.size then
+    { s with mask := s.mask ||| (bitMask i) }
+  else
+    s
+
+def BitSet.clearBit (s : BitSet) (i : Nat) : BitSet :=
+  if i < s.size then
+    let keep := (fullMask s.size) ^^^ (bitMask i)
+    { s with mask := s.mask &&& keep }
+  else
+    s
+
+def BitSet.hasBit (s : BitSet) (i : Nat) : Bool :=
+  if i < s.size then
+    (((s.mask >>> i) &&& 1) == 1)
+  else
+    false
+
+def BitSet.isEmpty (s : BitSet) : Bool :=
+  s.mask == 0
+
+def BitSet.popcount (s : BitSet) : Nat := Id.run do
+  let mut x := s.mask
+  let mut count := 0
+  while x != 0 do
+    x := x &&& (x - 1)
+    count := count + 1
+  return count
+
+def BitSet.firstSetBit? (s : BitSet) : Option Nat := Id.run do
+  let mut i := 0
+  while i < s.size do
+    if s.hasBit i then
+      return some i
+    i := i + 1
+  return none
+
+def BitSet.inter (a b : BitSet) : BitSet :=
+  let size := Nat.min a.size b.size
+  { size := size, mask := (a.mask &&& b.mask) &&& (fullMask size) }
+
+def BitSet.complement (s : BitSet) : BitSet :=
+  let m := s.mask &&& (fullMask s.size)
+  { size := s.size, mask := (fullMask s.size) ^^^ m }
+
+def BitSet.diff (a b : BitSet) : BitSet :=
+  a.inter b.complement
+
+def BitSet.ofIndices (size : Nat) (indices : List Nat) : BitSet := Id.run do
+  let mut s := BitSet.empty size
+  for i in indices do
+    s := s.setBit i
+  return s
+
+structure BitGraph where
+  size : Nat
+  rows : Array BitSet
+  deriving Repr
+
+def BitGraph.ofPackedRows (size : Nat) (rows : Array Nat) : BitGraph :=
+  let bitRows := rows.map (fun row => BitSet.ofNatMask size row)
+  { size := size, rows := bitRows }
+
+def BitGraph.ofNeighborLists (size : Nat) (neighbors : Array (List Nat)) : BitGraph :=
+  let bitRows := neighbors.map (fun row => BitSet.ofIndices size row)
+  { size := size, rows := bitRows }
+
+def BitGraph.hasEdge (g : BitGraph) (i j : Nat) : Bool :=
+  (g.rows[i]!).hasBit j
+
+def BitGraph.isSimpleUndirected (g : BitGraph) : Bool := Id.run do
+  if g.rows.size != g.size then
+    return false
+  let mut ok := true
+  let mut i := 0
+  while ok && i < g.size do
+    let row := g.rows[i]!
+    if row.size != g.size then
+      ok := false
+    if row.mask > fullMask g.size then
+      ok := false
+    if g.hasEdge i i then
+      ok := false
+    let mut j := 0
+    while ok && j < g.size do
+      if g.hasEdge i j != g.hasEdge j i then
+        ok := false
+      j := j + 1
+    i := i + 1
+  return ok
+
+def BitGraph.edgeCount (g : BitGraph) : Nat := Id.run do
+  let mut total := 0
+  let mut i := 0
+  while i < g.size do
+    total := total + (g.rows[i]!).popcount
+    i := i + 1
+  return total / 2
+
+def BitGraph.complement (g : BitGraph) : BitGraph :=
+  let rows := Id.run do
+    let mut out : Array BitSet := #[]
+    let mut i := 0
+    while i < g.size do
+      let row := (g.rows[i]!).complement.clearBit i
+      out := out.push row
+      i := i + 1
+    return out
+  { size := g.size, rows := rows }
+
+def formatVertices (vertices : List Nat) : String :=
+  match vertices.map (fun v => toString (v + 1)) with
+  | [] => "[]"
+  | first :: rest =>
+      let body := rest.foldl (fun acc item => acc ++ ", " ++ item) first
+      "[" ++ body ++ "]"
+
+structure LowerBoundResult where
+  cliqueWitness : Option (List Nat)
+  independentSetWitness : Option (List Nat)
+  deriving Repr
+
+def colorSort (g : BitGraph) (candidates : BitSet) : Array (Nat × Nat) := Id.run do
+  let mut colored : Array (Nat × Nat) := #[]
+  let mut uncolored := candidates
+  let mut color := 0
+  while !uncolored.isEmpty do
+    color := color + 1
+    let mut colorClass := uncolored
+    while !colorClass.isEmpty do
+      match colorClass.firstSetBit? with
+      | none =>
+          colorClass := BitSet.empty colorClass.size
+      | some v =>
+          colored := colored.push (v, color)
+          uncolored := uncolored.clearBit v
+          colorClass := colorClass.clearBit v
+          colorClass := colorClass.diff (g.rows[v]!)
+  return colored
+
+partial def cliqueWitness? (g : BitGraph) (target : Nat) : Option (List Nat) :=
+  let rec go (fuel : Nat) (chosenRev : List Nat) (chosen : Nat) (candidates : BitSet) : Option (List Nat) :=
+    if chosen >= target then
+      some chosenRev.reverse
+    else if fuel == 0 then
+      none
+    else if chosen + candidates.popcount < target then
+      none
+    else
+      let colored := colorSort g candidates
+      let rec loop (idx : Nat) (remaining : BitSet) : Option (List Nat) :=
+        match idx with
+        | 0 => none
+        | idx' + 1 =>
+            let (v, color) := colored[idx']!
+            if chosen + color < target then
+              none
+            else
+              let nextChosenRev := v :: chosenRev
+              let nextChosen := chosen + 1
+              let nextCandidates := remaining.inter (g.rows[v]!)
+              if nextChosen >= target then
+                some nextChosenRev.reverse
+              else
+                match go (fuel - 1) nextChosenRev nextChosen nextCandidates with
+                | some witness => some witness
+                | none => loop idx' (remaining.clearBit v)
+      loop colored.size candidates
+  go target [] 0 (BitSet.full g.size)
+
+def independentSetWitness? (g : BitGraph) (target : Nat) : Option (List Nat) :=
+  cliqueWitness? g.complement target
+
+def verifyLowerBound (g : BitGraph) (r s : Nat) : LowerBoundResult :=
+  {
+    cliqueWitness := cliqueWitness? g r
+    independentSetWitness := independentSetWitness? g s
+  }
+
+def claimR : Nat := 4
+def claimS : Nat := 13
+def claimNPlus1 : Nat := 139
+
+def r413Rows : Array Nat :=
+  #[
+    (109034747895067153830727281711170675344694 : Nat),
+    (90463608194782383862689085635428204284521 : Nat),
+    (167078787564055576364130732779981972310273 : Nat),
+    (143393153215887041907269844570483534078386 : Nat),
+    (95377475038746198116391472460666168693609 : Nat),
+    (65360897867106765405900835998327365478107 : Nat),
+    (134294760586922998754701871060649716567474 : Nat),
+    (267058250522701774433263289353561473981288 : Nat),
+    (59932981202700931751693035006880366540509 : Nat),
+    (217867367155381877538080013442119964978610 : Nat),
+    (99876038159797491637809289349050278402913 : Nat),
+    (44923599370567982399783132316714874287814 : Nat),
+    (133403341707016088122878214384696146750864 : Nat),
+    (27588179468612436431004079744859106630440 : Nat),
+    (174615469726474273537652646698303215220304 : Nat),
+    (19157043539638237515831924187688186113184 : Nat),
+    (15174886128652659516154375070050426476865 : Nat),
+    (1085488702104611174458533901037640462982 : Nat),
+    (110550911268528122962001880269093389165824 : Nat),
+    (11658025697218621662296689663933578398217 : Nat),
+    (179675757456233599007392983198828375938067 : Nat),
+    (95462622117510602497754288039037031360546 : Nat),
+    (261533836020153043481012260686477940641868 : Nat),
+    (4137062485874930180378245039543852769432 : Nat),
+    (1978932337493649995649831024509182361904 : Nat),
+    (11784296806606582233025735653958790316641 : Nat),
+    (70443808809437792392061782185540606496768 : Nat),
+    (273765243595771345598710431165496137746817 : Nat),
+    (182577648668836189132951595860489521074954 : Nat),
+    (90207144865544196267182225873945628255760 : Nat),
+    (33582448404723252590546874725378512931880 : Nat),
+    (207191090797412682896272400408964071725140 : Nat),
+    (88399868582786525849322781671847702693 : Nat),
+    (12256823762858888504722231103431811162435 : Nat),
+    (100896405075502182729988831118882062516866 : Nat),
+    (214473683891849251638554474622430836441284 : Nat),
+    (14174986656859776794056008095764076235288 : Nat),
+    (185900709198114062171654459432471328330800 : Nat),
+    (6168015139679745351912903179576432928865 : Nat),
+    (50787937741425537075187136997808802386114 : Nat),
+    (141559053596061343607320790370568423645569 : Nat),
+    (2044872115427516393894155003630041776906 : Nat),
+    (266957872677279995813245194248232240317968 : Nat),
+    (207925237682040428783767002079029075708972 : Nat),
+    (23164624261838900420420732177400820537424 : Nat),
+    (230251867844445040342795439671637932519584 : Nat),
+    (198996736710148871513987493391293292765508 : Nat),
+    (46290379559575282384610867048196273652357 : Nat),
+    (175652191943724667162218064780009943434498 : Nat),
+    (266914315352681727106898198673005163514368 : Nat),
+    (3158362568909656999905753544040215090185 : Nat),
+    (192110855938276846772193014361083391780883 : Nat),
+    (267504901561046668855069566898584616980518 : Nat),
+    (111188198198814218023748116728843127005256 : Nat),
+    (59891524654500499704956688643912544370845 : Nat),
+    (185797911568422701399364390659762807800114 : Nat),
+    (109578400607722785931930333597132812255840 : Nat),
+    (199080141567108964579482279975516400911560 : Nat),
+    (44436762719903634328825940906018937768336 : Nat),
+    (4313357259954060487003291865209182360356 : Nat),
+    (35509021506667211347770319238524772034112 : Nat),
+    (49069788808559023523531948053798513036417 : Nat),
+    (15791327899000675446169297597015892465922 : Nat),
+    (88920234624179481985917216546353515147777 : Nat),
+    (5657591586364101459366881732266540819467 : Nat),
+    (93663474429220442798249390218977340606486 : Nat),
+    (261508587923955207188756501346064301396009 : Nat),
+    (32670285114838088526790193382847665086558 : Nat),
+    (103452195324821284961478342798087729594544 : Nat),
+    (24513041980019553506587896012816484434280 : Nat),
+    (43921848456225030061225172914156311478992 : Nat),
+    (391128613768875012363071718382552352160 : Nat),
+    (177048523292583874098754190086386678500096 : Nat),
+    (14495244398071161661060521955765535643265 : Nat),
+    (174631341838302747744406090512121820359942 : Nat),
+    (126717973847420794326796003497256081709568 : Nat),
+    (5029903568343354199424053614847102858249 : Nat),
+    (6316701100556385300750986565537008543763 : Nat),
+    (87155240556798294099981012158631456722982 : Nat),
+    (261422767045356834846585923819829801099336 : Nat),
+    (239730604812492863255940895797842964856985 : Nat),
+    (1364484101067195017247025071085124485430 : Nat),
+    (125570902660591936195807178430100139737696 : Nat),
+    (9541324807320041630548595573521716479176 : Nat),
+    (707401800909406234074962345728016648592 : Nat),
+    (188229823041414028909542584171462287430432 : Nat),
+    (11336666376661086522884214568706070554176 : Nat),
+    (239773482848880912735401428678880058690689 : Nat),
+    (5533628576894545866322029205307133040902 : Nat),
+    (98519825452470276842731332520578629317121 : Nat),
+    (32162168120367608360406778729379469091850 : Nat),
+    (111985219632423121159787204060626634983444 : Nat),
+    (575065381250141055870113249403536511016 : Nat),
+    (1490413129421220575203637135069683064916 : Nat),
+    (45345980940499279851597412895326862721153 : Nat),
+    (6472034529691421717388582207320459346243 : Nat),
+    (149737663638349842304295813090118647480962 : Nat),
+    (89180824519559714188226118787473326867720 : Nat),
+    (188229837679826643816890101190433437911576 : Nat),
+    (16611072340760862521261555021806351946800 : Nat),
+    (384813196901426761065403938608883181669 : Nat),
+    (228758978384331097157075907832281923866818 : Nat),
+    (152624950815204472516140538875306213155201 : Nat),
+    (24687100488688898976383970984043542037258 : Nat),
+    (91228932108653228958763018682194708301332 : Nat),
+    (27289104901358518578227216375537471917096 : Nat),
+    (23442373229451167749555656170999433009232 : Nat),
+    (53849901156815294673127261329071778574497 : Nat),
+    (185815873169918525327286524131299576799555 : Nat),
+    (152830184409672380783141754029680207381122 : Nat),
+    (92983889493760697781752949175055080850696 : Nat),
+    (191242114136421073468567176521297575479833 : Nat),
+    (32674038149796540653114395484760603759666 : Nat),
+    (269687637645757833417811077944271560255584 : Nat),
+    (49028384558443340984899346579365295575244 : Nat),
+    (209328352813096649180615293056231510417556 : Nat),
+    (6916500686089059375111846939965079503652 : Nat),
+    (27614520311761164278188880771782726026817 : Nat),
+    (46381699083577928506330021750339478555778 : Nat),
+    (96676603848371781063867823242173657782529 : Nat),
+    (179912137280116229378174405978733671625226 : Nat),
+    (90831063509230603388551184782654639203344 : Nat),
+    (14073061309899013521390375405129275852841 : Nat),
+    (65747324002301212486230996159701794787411 : Nat),
+    (318649950135639609415823323809775716868258 : Nat),
+    (95400230949684715766222585566004253180233 : Nat),
+    (65576550872464076977923315597152097174171 : Nat),
+    (49430011960829619410646913228830184637634 : Nat),
+    (217967016389448320079917588007648808297486 : Nat),
+    (220505676842260150114985785128841911074884 : Nat),
+    (231392798999221394324986063232431634582536 : Nat),
+    (181783569746226875017873357813003824762966 : Nat),
+    (57382392445868256258942197114151980016016 : Nat),
+    (93944567484999431196054372594342691439884 : Nat),
+    (217876632915215577274613866253668449525797 : Nat),
+    (117004318996159294067956410709965656824684 : Nat),
+    (54512317078436128548734504609920292492511 : Nat),
+    (26904958709170459573281976229855369380480 : Nat),
+  ]
+
+def r413Graph : BitGraph :=
+  BitGraph.ofPackedRows 138 r413Rows
+
+def main : IO UInt32 := do
+  IO.println "Processing single-file Lean4web example R_4_13_ge_139"
+  IO.println s!"  claim: R({claimR}, {claimS}) >= {claimNPlus1}"
+  IO.println s!"  vertices: {r413Graph.size}"
+  IO.println s!"  valid simple graph: {r413Graph.isSimpleUndirected}"
+  IO.println s!"  edges: {r413Graph.edgeCount}"
+
+  let result := verifyLowerBound r413Graph claimR claimS
+  match result.cliqueWitness with
+  | some witness =>
+      IO.println s!"  found forbidden clique: {formatVertices witness}"
+      return 1
+  | none =>
+      IO.println s!"  no {claimR}-clique found"
+
+  match result.independentSetWitness with
+  | some witness =>
+      IO.println s!"  found forbidden independent set: {formatVertices witness}"
+      return 1
+  | none =>
+      IO.println s!"  no independent set of size {claimS} found"
+
+  IO.println "  lower-bound check passed"
+  return 0
+
+end RamseyWeb
+
+#eval RamseyWeb.main
